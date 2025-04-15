@@ -1,0 +1,73 @@
+---
+title: "data transformation"
+format: html
+editor: visual
+---
+
+## Packages
+
+```{r}
+library(sf)
+library(tidyverse)
+library(here)
+```
+
+## Joining coords with sites
+
+```{r}
+coords <- read_sf(here("data/GIS-Data/Sites Haour.shp"))
+sites <- read.csv2(here("data/Sites.csv"))
+sites_2 <- read.csv2(here("data/Sites_2.csv"))
+```
+
+```{r}
+coords.1 <- coords |> 
+  rename(ID = id) |> 
+  right_join(sites) 
+
+coords.1 |> 
+  st_write(here("data/GIS-Data/Sites_comb.csv"), layer_options = "GEOMETRY=AS_XY")
+
+coords_pure <- coords.1 |> 
+  st_coordinates() |> 
+as.data.frame()
+
+
+testi <- cbind(coords.1, coords_pure)
+
+write_csv2(testi, here("data/GIS-Data/Sites_comb2.csv"))
+```
+
+```{r}
+coords.2 <- st_as_sf(sites_2, coords = c("WGS_X", "WGS_Y"), crs = 4326)
+```
+
+## Sorting chad sherds
+
+small ones
+
+```{r}
+sherds_chad <- read.csv2(here("data/Sherds_Chad.csv"))
+
+sherds_chad <- sherds_chad |> 
+  arrange(Sherd_ID)
+
+write_csv2(sherds_chad, here("data/Sherds_Chad_sort.csv"))
+```
+
+```{r}
+sherds_chad_petro <- read.csv2(here("data/TIE&KAMAKA_interesting_sherds.csv"))
+
+sherds_chad_attr <-  read.csv2(here("data/chad_loc_sherds.csv"), fileEncoding = "UTF-8")
+
+```
+
+```{r}
+sherds_chad_petro <- sherds_chad_petro |> 
+  left_join(sherds_chad_attr) |> 
+  arrange(Sherd_ID) |> 
+  dplyr::select(-Site) |> 
+  rename(Site = Fundstelle, Trench = Grabungsschnitt)
+
+write_csv2(sherds_chad_petro, here("data/Sherds_Chad_petro_sort.csv"))
+```

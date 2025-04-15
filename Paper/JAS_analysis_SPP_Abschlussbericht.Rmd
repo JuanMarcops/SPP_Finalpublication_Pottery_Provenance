@@ -1,0 +1,2104 @@
+---
+title: "RFA_analysis_SPP_Abschluss"
+author: "Juan-Marco Puerta Schardt"
+date: "2025-04-06"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## loading packages and premade functions
+
+```{r 1}
+library(here)         # Loads the 'here' package to manage file paths more efficiently  
+library(tidyverse)    # Loads the 'tidyverse' package for data cleaning and transformation  
+library(factoextra)   # Provides visualization tools for multivariate statistical analysis  
+library(FactoMineR)   # Supports multivariate statistical methods such as PCA and MCA  
+library(MASS)         # Contains functions for discriminant analysis and statistical modeling
+library(caret)        # Offers tools for predictive modeling and machine learning  
+library(plotly)       # Enables interactive visualizations  
+library(cowplot)
+# Load custom functions from an external script  
+source(here("R/RFA-Functions.R"))  
+
+```
+
+## plotting only with noto sans
+
+```{r}
+
+# Theme mit Noto Sans als Objekt definieren
+theme_noto <- theme_minimal(base_family = "Noto Sans") +
+  theme(
+    text = element_text(family = "Noto Sans"),
+    axis.title = element_text(family = "Noto Sans"),
+    axis.text = element_text(family = "Noto Sans"),
+    legend.text = element_text(family = "Noto Sans"),
+    legend.title = element_text(family = "Noto Sans"),
+    strip.text = element_text(family = "Noto Sans"),
+    plot.title = element_text(family = "Noto Sans")
+  )
+
+
+```
+
+
+
+## loading registry and data
+
+```{r 2}
+
+RFA <- read.csv2(here("data/rfa_spp_2025.csv"))
+```
+
+## get values and errors
+
+```{r }
+# Process the RFA data to extract values, replacing "<LOD" with 0 and converting to numeric
+RFA.val <- RFA |> 
+  dplyr::select(Nr, Mo:Mg) |>  # Select columns from 'Nr' to 'Mg'
+  dplyr::select(-contains(".Error")) |>  # Exclude columns containing ".Error"
+  column_to_rownames("Nr") |>  # Set 'Nr' as row names
+  mutate(across(everything(), ~ ifelse(grepl("<LOD", .), 0, as.character(.)))) |>  # Replace "<LOD" with 0
+  mutate_all(funs(str_replace_all(., ",", "\\."))) |>  # Replace commas with periods
+  mutate_all(as.numeric)  # Convert all columns to numeric
+
+# Process the RFA data to extract error values
+RFA.error <- RFA |> 
+  dplyr::select(Nr, contains(".Error")) |>  # Select columns containing ".Error"
+  column_to_rownames("Nr") |>   # Set 'Nr' as row names
+    mutate_all(as.numeric)
+```
+
+
+```{r}
+LOD_proportions <- RFA |> 
+  # dplyr::select(where(~ any(grepl("<LOD", .))))  |> # Keep only columns containing "<LOD"
+   summarise(across(everything(), ~ sum(grepl("<LOD", .)) / n())) |>  # Calculate proportion of "<LOD" per column
+  pivot_longer(everything(), names_to = "Element", values_to = "Proportion_LOD") |>  # Convert to long format
+  filter(Proportion_LOD > 0) |>  # Keep only columns with at least one "<LOD"
+  arrange(desc(Proportion_LOD))  # Sort by proportion in descending order
+
+bad.lod.elements <- LOD_proportions |> 
+  filter(Proportion_LOD > 0.25) |> 
+  pull(Element)
+
+# Plot the data using ggplot2
+ggplot(LOD_proportions, aes(x = reorder(Element, -Proportion_LOD), y = Proportion_LOD)) +
+  geom_bar(stat = "identity", fill = "steelblue") +  # Bar plot
+  labs(
+    x = "Element",  # x-axis label
+    y = "Anteil der <LOD-Werte",  # y-axis label
+    title = "Anteil der <LOD-Werte pro Element"  # Plot title
+  ) +
+  theme_minimal() +  # Use a minimal theme
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+```
+
+##error
+
+```{r}
+
+RFA.error_prop <- RFA.error/RFA.val*100 
+
+# Replace infinite values (Inf) with NA (e.g., where RFA.val was 0)
+RFA.error_prop[RFA.error_prop == Inf] <- NA
+
+# Summarize the relative error statistics (mean, sd, median) for each element
+error_summary <- RFA.error_prop %>%
+  summarise(across(everything(), list(
+    mean = ~ mean(.x, na.rm = TRUE),  # Calculate mean
+    sd = ~ sd(.x, na.rm = TRUE),      # Calculate standard deviation
+    median = ~ median(.x, na.rm = TRUE)  # Calculate median
+  ))) %>%
+  pivot_longer(
+    cols = everything(),  # Convert all columns to long format
+    names_to = c("Element", "variable"),  # Split column names into "Element" and "variable"
+    names_pattern = "(.*)_(.*)"  # Use regex to separate element names from statistics
+  )
+
+# Filter and print elements with mean relative error < 20%, sorted by value
+error_summary |> 
+  filter(variable == "mean") |>  # Filter for mean values
+  arrange(value) |>  # Sort by mean value
+  rename(mean = value) |> #Renaming value to mean
+  mutate(Element = str_extract(Element, "^[A-Za-z]+")) |>  # Extract element name (remove suffixes)
+  print()
+
+# Filter and print elements with standard deviation of relative error, sorted by value
+error_summary |> 
+  filter(variable == "sd") |>  # Filter for standard deviation values
+  arrange(value) |>  # Sort by standard deviation
+    rename(sd = value) |> #Renaming value to sd
+  mutate(Element = str_extract(Element, "^[A-Za-z]+")) |>  # Extract element name
+  print()
+
+# Filter and print elements with median relative error, sorted by value
+error_summary |> 
+  filter(variable == "median") |>  # Filter for median values
+  arrange(value) |>  # Sort by median
+      rename(sd = value) |> #Renaming value to median
+  mutate(Element = str_extract(Element, "^[A-Za-z]+")) |>  # Extract element name
+  print()
+
+# Extract elements with mean relative error < 10% (excluding "Bal")
+low.error.elements_10 <- error_summary |> 
+  filter(variable == "mean" & value < 10) |>  # Filter for mean values below 10%
+  arrange(value) |>  # Sort by mean value
+  mutate(Element = str_extract(Element, "^[A-Za-z]+")) |>  # Extract element name
+  filter(Element != "Bal") |>  # Exclude "Bal" (if present)
+  pull(Element)  # Extract element names as a vector
+
+# Extract elements with mean relative error < 15% (excluding "Bal")
+low.error.elements_15 <- error_summary |> 
+  filter(variable == "mean" & value < 15) |>  # Filter for mean values below 20%
+  arrange(value) |>  # Sort by mean value
+  mutate(Element = str_extract(Element, "^[A-Za-z]+")) |>  # Extract element name
+  filter(Element != "Bal") |>  # Exclude "Bal" (if present)
+  pull(Element)  # Extract element names as a vector
+
+# Extract elements with mean relative error < 20% (excluding "Bal")
+low.error.elements_20 <- error_summary |> 
+  filter(variable == "mean" & value < 20) |>  # Filter for mean values below 20%
+  arrange(value) |>  # Sort by mean value
+  mutate(Element = str_extract(Element, "^[A-Za-z]+")) |>  # Extract element name
+  filter(Element != "Bal") |>  # Exclude "Bal" (if present)
+  pull(Element)  # Extract element names as a vector
+
+all_elements <- RFA.val |> 
+  dplyr::select(-Bal) |> #exclude Bal
+  colnames() #extract names of elements
+
+# Print the results
+print(low.error.elements_10)
+print(low.error.elements_20)
+```
+
+```{r}
+# Ensure RFA.error_prop is in a tidy format (long format) for ggplot
+RFA.error_prop_long <- RFA.error_prop %>%
+  pivot_longer(cols = everything(), names_to = "Element", values_to = "Error_Proportion") %>%
+  filter(!is.na(Error_Proportion))  # Remove NA values
+
+# Create the boxplot
+ggplot(RFA.error_prop_long, aes(x = Element, y = Error_Proportion)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +  # Boxplot with custom fill color
+  labs(
+    x = "Element",  # x-axis label
+    y = "Relative Error (%)",  # y-axis label
+    title = "Distribution of Relative Errors by Element"  # Plot title
+  ) +
+  theme_minimal() +  # Use a minimal theme
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+```
+
+
+# LOD taken into account
+```{r}
+# Process the RFA data to extract values, replacing "<LOD" with the midpoint between the column mean and 0
+RFA.val <- RFA |> 
+  dplyr::select(Nr, Mo:Mg) |>  # Select columns from 'Nr' to 'Mg'
+  dplyr::select(-contains(".Error")) |>  # Exclude columns containing ".Error"
+  column_to_rownames("Nr") |>  # Set 'Nr' as row names
+  mutate(across(everything(), ~ ifelse(grepl("<LOD", .), NA, as.character(.)))) |>  # Replace "<LOD" with NA
+  mutate_all(funs(str_replace_all(., ",", "\\."))) |>  # Replace commas with periods
+  mutate_all(as.numeric) |>  # Convert all columns to numeric
+  mutate(across(everything(), ~ ifelse(is.na(.), min(., na.rm = TRUE) / 2, .))) |>  # Replace NA with midpoint between column mean and 0
+ dplyr::select(where(~!any(is.infinite(.)))) #remove columns containing only na
+
+
+```
+
+## calibration
+```{r}
+# Load calibration data
+calib_mean <- read.csv2(here("data/Calibration data/calib_mean.csv")) |> 
+  dplyr::select(-Position)  # Remove the "Position" column
+
+calib_aim <- read.csv2(here("data/Calibration data/calib_aim.csv")) |> 
+  dplyr::select(-Probe)  # Remove the "Probe" column
+
+# Keep only common columns between calib_mean and calib_aim
+calib_mean <- calib_mean |>  
+  dplyr::select(all_of(intersect(names(calib_aim), names(calib_mean)))) 
+
+calib_aim <- calib_aim |>  
+  dplyr::select(all_of(intersect(names(calib_aim), names(calib_mean))))
+```
+
+```{r}
+# Initialize an empty list to store the linear regression models
+models <- list()
+
+# Perform linear regression for each column in calib_aim
+for (col in names(calib_aim)) {
+  # Combine calibration and target data into a dataframe
+  data <- data.frame(y = calib_mean[[col]], x = calib_aim[[col]])
+  
+  # Create a linear model: y ~ x (y is the dependent variable, x is the independent variable)
+  model <- lm(y ~ x, data = data)
+  
+  # Store the model in the list with the column name as the key
+  models[[col]] <- model
+  
+  # Calculate the correlation and p-value between y and x
+  correlation <- cor.test(data$y, data$x)
+  
+  # Print the correlation coefficient and p-value for the current column
+  cat("Correlation and p-value for column", col, ":", correlation$estimate, "&", correlation$p.value, "\n")
+}
+
+# Display the list of models
+print(models)
+
+# Function to calibrate new data using the linear models
+calibrate_data <- function(new_data, models) {
+  # Create a copy of the new data to store the calibrated values
+  calibrated_data <- new_data
+  
+  # Loop through each column in the new data
+  for (col in names(new_data)) {
+    # Check if a model exists for the current column
+    if (col %in% names(models)) {
+      # Extract the model for the current column
+      model <- models[[col]]
+      
+      # Get the intercept and slope from the model coefficients
+      intercept <- coef(model)[1]
+      slope <- coef(model)[2]
+      
+      # Apply the calibration equation: y = slope * x + intercept
+      calibrated_data[[col]] <- slope * new_data[[col]] + intercept
+    }
+  }
+  
+  # Return the calibrated data
+  return(calibrated_data)
+}
+
+# Apply the calibration models to the new dataframe (calib_mean)
+calibrated_data <- calibrate_data(calib_mean, models)
+
+# Display the calibrated dataframe
+print(calibrated_data)
+
+# Apply the calibration models to RFA.val
+RFA.val_cal <- calibrate_data(RFA.val, models)
+
+RFA.val_cal <- RFA |> 
+  dplyr::select(Object:Region) |> 
+cbind(RFA.val_cal)
+
+RFA.val_cal |> 
+  write.csv2(here("data/rfa_spp_2025_cal.csv")) 
+  
+
+```
+
+
+## removing outliers
+```{r}
+remove_outliers_and_calculate_stat <- function(values, threshold = 1.5, method = "iqr", calc_sd = FALSE) {
+  # Remove NA values from the input
+  values <- na.omit(values)
+  n <- length(values)
+
+  # If fewer than 3 values exist or all values are the same, return mean or SD directly
+  if (n < 3 || length(unique(values)) == 1) {  # NEW: Check if all values are identical
+    if (calc_sd) {
+      return(0)  # If all values are identical, the standard deviation is always 0
+    } else {
+      return(mean(values, na.rm = TRUE))
+    }
+  }
+
+  # Check if the selected method is valid
+  if (!method %in% c("z", "iqr", "modified_z", "dixon")) {
+    stop("Invalid method. Use 'z' for Z-score, 'iqr' for Interquartile Range, 'modified_z' for Modified Z-Score, or 'dixon' for Dixon's Q-Test.")
+  }
+
+  # Z-score method
+  if (method == "z") {
+    mean_value <- mean(values, na.rm = TRUE)
+    sd_value <- sd(values, na.rm = TRUE)
+
+    # Ensure sd_value is not 0 to avoid division by zero
+    if (sd_value == 0) {
+      non_outliers <- values
+    } else {
+      z_scores <- (values - mean_value) / sd_value
+      non_outliers <- values[abs(z_scores) <= threshold]
+    }
+
+  # Interquartile Range (IQR) method  
+  } else if (method == "iqr") {  
+    Q1 <- quantile(values, 0.25, na.rm = TRUE)
+    Q3 <- quantile(values, 0.75, na.rm = TRUE)
+    IQR_value <- Q3 - Q1
+    lower_bound <- Q1 - threshold * IQR_value
+    upper_bound <- Q3 + threshold * IQR_value
+    non_outliers <- values[values >= lower_bound & values <= upper_bound]
+
+  # Modified Z-score method  
+  } else if (method == "modified_z") {  
+    median_value <- median(values, na.rm = TRUE)
+    mad_value <- mad(values, na.rm = TRUE)
+
+    # Ensure mad_value is not 0 to avoid division by zero
+    if (mad_value == 0) {
+      non_outliers <- values
+    } else {
+      modified_z_scores <- 0.6745 * (values - median_value) / mad_value
+      non_outliers <- values[abs(modified_z_scores) <= threshold]
+    }
+
+  # Dixon’s Q-test for outliers  
+  } else if (method == "dixon") {  
+    sorted_values <- sort(values)
+
+    # If all values are identical, Dixon’s test is meaningless
+    if (sorted_values[n] == sorted_values[1]) {
+      non_outliers <- sorted_values
+    } else {
+      Q_min <- (sorted_values[2] - sorted_values[1]) / (sorted_values[n] - sorted_values[1])
+      Q_max <- (sorted_values[n] - sorted_values[n - 1]) / (sorted_values[n] - sorted_values[1])
+
+      critical_Q <- 0.941  # 95% confidence level
+
+      # Check for NA values in Q-values (in case of division by zero)
+      if (is.na(Q_min) | is.na(Q_max)) {
+        non_outliers <- sorted_values
+      } else {
+        # Remove both outliers if both exceed the critical threshold
+        if (Q_min > critical_Q & Q_max > critical_Q) {
+          non_outliers <- sorted_values[2:(n - 1)]
+        } else if (Q_min > critical_Q) {
+          non_outliers <- sorted_values[-1]  # Remove only the smallest value
+        } else if (Q_max > critical_Q) {
+          non_outliers <- sorted_values[-n]  # Remove only the largest value
+        } else {
+          non_outliers <- sorted_values  # No outliers detected
+        }
+      }
+    }
+  }
+
+  # Calculate either the mean or standard deviation percentage
+  if (calc_sd) {
+    mean_non_outliers <- mean(non_outliers, na.rm = TRUE)
+    sd_non_outliers <- sd(non_outliers, na.rm = TRUE)
+
+    # Ensure no division by zero occurs
+    if (mean_non_outliers == 0) {
+      return(0)
+    } else {
+      return(sd_non_outliers / mean_non_outliers * 100)
+    }
+  } else {
+    return(mean(non_outliers, na.rm = TRUE))
+  }
+}
+
+```
+
+
+```{r}
+# Apply Dixon’s Q-test method for outlier removal and calculating mean
+RFA.val_dix <- RFA.val_cal |>  
+  filter(Object != "Standart-TS") |>  
+  group_by(Object) |>  
+  summarise(
+    across(where(is.numeric), ~remove_outliers_and_calculate_stat(.x, method = "dixon")),  
+    across(where(is.character), first)  
+  )
+
+```
+
+```{r}
+# Compute standard deviation percentage using Dixon’s Q-test method  
+RFA.sd_cl <- RFA.val_cal |>  
+  filter(Object != "Standart-TS") |>  
+  group_by(Object) |>  
+  summarise(
+    across(where(is.numeric), ~remove_outliers_and_calculate_stat(.x, method = "dixon", calc_sd = TRUE)),  
+    across(where(is.character), first)  
+  )
+```
+
+```{r}
+RFA.sd_cl |> 
+  pivot_longer(low.error.elements_15, names_to = "Element", values_to = "mean") |>  # Pivot to long format
+  group_by(Element) |>  # Group by 'Element'
+  summarise(mean = mean(mean, na.rm = TRUE)) |>  # Calculate mean for each element
+  arrange(-mean)  # Arrange elements by descending mean
+
+low.sd.elements.cl_10 <- RFA.sd_cl |> 
+  pivot_longer(low.error.elements_15, names_to = "Element", values_to = "mean") |>  # Pivot to long format
+  group_by(Element) |>  # Group by 'Element'
+  summarise(mean = mean(mean, na.rm = TRUE)) |>  # Calculate mean for each element
+  filter(mean < 10) |>  # Filter elements with mean less than 10
+  pull(Element)  # Extract 'Element' names
+```
+
+## modified z as clean data
+```{r}
+RFA.val_mean <- RFA.val_dix # putting the means that were cleanded with Dixons method as the data used in further processes
+```
+
+
+
+#elements
+## main elements
+```{r}
+main_elements <- c("Si", "Al", "Ca", "K", "Fe", "Ti", "P")  # Define the main elements for selection
+
+RFA.ME <- RFA.val_mean |> 
+  dplyr::select(all_of(main_elements)) |>  # Select columns for the main elements
+  mutate(Si = Si*2.1392,  # Adjust Si values
+         Al = Al*1.8895,  # Adjust Al values
+         Ca = Ca*1.3992,  # Adjust Ca values
+         K = K*1.2046,  # Adjust K values
+         Fe = Fe*1.4297,  # Adjust Fe values
+         # S = S*2.4972,  # Commented out S adjustment
+         Ti = Ti*1.6681,  # Adjust Ti values
+         P = 2.2916,  # Set P to a fixed value
+      #   Mn = 1.5825  # Set Mn to a fixed value
+  )
+
+df_long <- RFA.ME %>%
+  rownames_to_column(var = "row_id") %>%  # Convert row names to a column called 'row_id'
+  pivot_longer(-row_id, names_to = "variable", values_to = "value")  # Pivot data to long format
+
+# Berechnen Sie die Summe jeder Zeile und fügen Sie sie hinzu
+df_long <- df_long %>%
+  group_by(row_id) %>%  # Group by 'row_id'
+  mutate(row_sum = sum(value)) %>%  # Calculate row sum
+  ungroup()  # Ungroup after summing
+
+# Berechnen Sie die Prozente
+df_long <- df_long %>%
+  mutate(percent = (value / row_sum) * 100)  # Calculate percentage of each value
+
+# Konvertieren Sie zurück in das breite Format
+RFA.ME <- df_long %>%
+  dplyr::select(row_id, variable, percent) %>%  # Select 'row_id', 'variable', and 'percent' columns
+  pivot_wider(names_from = "variable", values_from = "percent") %>%  # Pivot data back to wide format
+  column_to_rownames(var = "row_id")  # Convert 'row_id' column back to row names
+
+```
+
+
+## new data
+```{r}
+
+RFA.val <- RFA.val_mean  # Assign RFA.val_mean to RFA.val
+
+RFA.val <- RFA.val |> 
+ dplyr::select(-Object, -N_Measurements, -Region,-purpose,-Site)  # Select only the columns in 'all_elements'
+
+all_elements <- RFA.val |> 
+  rename(Al2O3 = Al, Fe2O3 = Fe, SiO2 = Si) |>  # Rename elements for consistency
+  colnames()  # Get column names after renaming
+
+RFA.val <- RFA.val |> 
+  dplyr::select(-all_of(main_elements)) |>  # Exclude 'main_elements' columns
+  cbind(RFA.ME) |>  # Add the 'RFA.ME' data frame
+  dplyr::select(any_of(colnames(RFA[1:13,])), all_of(main_elements), everything())  # Reorder columns to match protocol and main_elements
+
+low.sd.elements.cl_10 <- RFA.val |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select columns in 'low.sd.elements.cl_10'
+  rename(Al2O3 = Al, Fe2O3 = Fe, SiO2 = Si) |>  # Rename elements for consistency
+  colnames()  # Get column names after renaming
+
+RFA.val <- RFA.val |> 
+  rename(Al2O3 = Al, Fe2O3 = Fe, SiO2 = Si)  # Rename elements for consistency
+
+```
+
+
+# Standardvalue
+```{r}
+RFA.std <- RFA.val |>  
+  dplyr::select(any_of(all_elements)) |>  # Select columns from 'all_elements'
+  mutate_all(~ (. - mean(.)) / sd(.))  # Standardize each column by subtracting the mean and dividing by the standard deviation
+
+
+```
+
+
+# final RFA.val
+```{r}
+protocol_mean <- RFA |> 
+  dplyr::select(Object, Site, Region) |> 
+  group_by(Object) |>  # Group data by 'Object'
+  summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)),  # Calculate mean for numeric columns, ignoring NAs
+            across(where(is.character), first))  # Take the first value for character columns
+
+RFA.val <- protocol_mean |> 
+  cbind(RFA.val) |>  # Combine 'protocol_mean' with 'RFA.val' by column
+  remove_rownames()  # Remove row names
+
+RFA.std <- protocol_mean |> 
+  cbind(RFA.std) |>  # Combine 'protocol_mean' with 'RFA.std' by column
+  remove_rownames()  # Remove row names
+
+```
+
+
+```{r}
+RFA.val |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select columns in 'low.sd.elements.cl_10'
+  summarise(across(everything(), ~ (sd(.x, na.rm = TRUE) / mean(.x, na.rm = TRUE)) * 100))  # Calculate coefficient of variation (CV) for each selected column
+
+```
+
+
+# malhanobis function
+```{r}
+# Function to detect Mahalanobis outliers
+detect_mahalanobis_outliers <- function(data, pca = NULL, quantile_threshold = 0.3) {
+  # If a PCA object is provided, use its coordinates as the data basis
+  if (!is.null(pca)) {
+    data <- pca$ind$coord  # Default is to use PCA coordinates from FactoMineR
+  }
+  
+  # Remove columns with zero variance to keep covariance matrix invertible
+  # data <- data[, apply(data, 2, var) > 0, drop = FALSE]
+  
+  # Access the coordinates from the PCA object (if provided)
+  data <- data$ind$coord
+  
+  # Calculate the Mahalanobis distance
+  center <- colMeans(data, na.rm = TRUE)  # Calculate the mean for each variable
+  cov_matrix <- cov(data, use = "complete.obs")  # Calculate the covariance matrix
+  mahal_dist <- mahalanobis(data, center, cov_matrix)  # Calculate Mahalanobis distance
+  
+  # Set the Chi-square threshold based on the quantile provided
+  cutoff <- qchisq(quantile_threshold, df = ncol(data))  # Use degrees of freedom = number of variables
+  
+  # Identify outliers (Mahalanobis distance greater than cutoff)
+  outliers <- which(mahal_dist > cutoff)
+  
+  # Return the indices of outliers
+  return(outliers)
+}
+
+
+calculate_mahalanobis_distances <- function(data) {
+  # If a PCA object is provided, use its coordinates as the data basis
+ 
+    data <- data$ind$coord  # Default is to use PCA coordinates from FactoMineR
+
+  
+  # Ensure row names are preserved
+  object_names <- rownames(data)
+  
+  # Calculate the Mahalanobis distance
+  center <- colMeans(data, na.rm = TRUE)  # Calculate the mean for each variable
+  cov_matrix <- cov(data, use = "complete.obs")  # Calculate the covariance matrix
+  mahal_dist <- mahalanobis(data, center, cov_matrix)  # Calculate Mahalanobis distance
+  
+  # Create a DataFrame with object names and Mahalanobis distances
+  result <- data.frame(Object = object_names, Mahalanobis_Distance = mahal_dist)
+  
+  return(result)
+}
+
+```
+
+
+
+# RFA.std as final version
+```{r}
+RFA.fin <- RFA.std # Making the standardized RFA values the basis for further analysis
+
+RFA.fin 
+```
+
+
+# removing outliers from regional groups
+## Chad
+### Lake_Chad_Northwest
+
+```{r}
+# Filter and clean the data for the Lake Chad Northwest region and specific objects
+chad_nw1 <- RFA.fin |> 
+  filter(Region == "Lake_Chad_Northwest" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |> 
+  remove_rownames() |>  # Remove the row names from the data
+  column_to_rownames("Object")  # Set "Object" column as row names
+
+# Perform PCA on the selected elements from the filtered data
+chad_nw_pca <- chad_nw1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements that are in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(chad_nw_pca)  # Call the function to detect outliers
+outliers  # Output the indices of the outliers
+length(outliers)  # Output the number of detected outliers
+
+```
+
+```{r}
+# PCA visualization with outliers highlighted
+fviz_pca_ind(chad_nw_pca, 
+             label = "none",  # Do not display labels
+             habillage = 1:nrow(chad_nw1) %in% outliers,  # Highlight outliers (True for outliers)
+             addEllipses = TRUE,  # Add concentration ellipses
+             palette = c("black", "red"))  # Color points based on whether they are outliers
+
+# PCA visualization with outliers highlighted, axes 3 and 4
+fviz_pca_ind(chad_nw_pca, 
+             axes = c(3,4),  # Use the 3rd and 4th principal components
+             label = "none",  # Do not display labels
+             habillage = 1:nrow(chad_nw1) %in% outliers,  # Highlight outliers (True for outliers)
+             addEllipses = TRUE,  # Add concentration ellipses
+             palette = c("black", "red"))  # Color points based on whether they are outliers
+
+# PCA visualization without outliers highlighted, axes 1 and 2
+fviz_pca_ind(chad_nw_pca, 
+             axes = c(1,2))  # Use the 1st and 2nd principal components
+
+# PCA variable visualization, axes 1 and 2
+fviz_pca_var(chad_nw_pca, 
+             axes = c(1,2))  # Use the 1st and 2nd principal components
+
+# PCA visualization without outliers highlighted, axes 3 and 4
+fviz_pca_ind(chad_nw_pca, 
+             axes = c(3,4))  # Use the 3rd and 4th principal components
+
+# PCA variable visualization, axes 3 and 4
+fviz_pca_var(chad_nw_pca, 
+             axes = c(3,4))  # Use the 3rd and 4th principal components
+
+# Store outliers' indices
+outliers_chad_nw <- outliers
+
+```
+
+### Lake_Chad_west
+
+
+```{r}
+# Filter and clean the data for the Lake Chad West region and specific objects
+chad_w1 <- RFA.fin |> 
+  filter(Region == "Lake_Chad_West" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |> 
+  remove_rownames() |>  # Remove the row names from the data
+  column_to_rownames("Object")  # Set "Object" column as row names
+
+# Perform PCA on the selected elements from the filtered data
+chad_w_pca <- chad_w1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements that are in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(chad_w_pca)  # Call the function to detect outliers
+
+# Output the indices of the detected outliers
+outliers  
+
+```
+
+```{r}
+# Visualize PCA with highlighting of outliers
+fviz_pca_ind(chad_w_pca, 
+             label = "none",  # No labels displayed for the points
+             habillage = 1:nrow(chad_w1) %in% outliers,  # Color points based on whether they are outliers
+             palette = c("black", "red"))  # Black for non-outliers, red for outliers
+
+# Visualize PCA with highlighting of outliers on axes 3 and 4
+fviz_pca_ind(chad_w_pca, 
+             axes = c(3,4),  # Use axes 3 and 4 for the PCA plot
+             label = "none",  # No labels displayed for the points
+             habillage = 1:nrow(chad_w1) %in% outliers,  # Color points based on whether they are outliers
+             palette = c("black", "red"))  # Black for non-outliers, red for outliers
+
+# Visualize PCA without highlighting outliers, using axes 1 and 2
+fviz_pca_ind(chad_w_pca, 
+             axes = c(1,2))  # Use axes 1 and 2 for the PCA plot
+
+# Visualize PCA variable contributions, highlighting the relationship between variables on axes 1 and 2
+fviz_pca_var(chad_w_pca, 
+             axes = c(1,2))  # Use axes 1 and 2 for the PCA variable plot
+
+# Visualize PCA without highlighting outliers, using axes 3 and 4
+fviz_pca_ind(chad_w_pca, 
+             axes = c(3,4))  # Use axes 3 and 4 for the PCA plot
+
+# Visualize PCA variable contributions, highlighting the relationship between variables on axes 3 and 4
+fviz_pca_var(chad_w_pca, 
+             axes = c(3,4))  # Use axes 3 and 4 for the PCA variable plot
+
+# Store the detected outliers for further analysis
+outliers_chad_w <- outliers  # Save the outliers detected in the PCA
+
+```
+### Lake Chad East
+
+```{r}
+# Filter the data for the Lake Chad East region and exclude certain objects
+chad_e1 <- RFA.fin |> 
+  filter((Region == "Lake_Chad_East") | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Filter by region and specific objects
+  filter(!Object %in% c("KAM_4", "TIE_100", "TIE_101", "TIE_13", "TIE_15"))|>  # Exclude specific objects
+  filter(!grepl("^TIE2", Object)) |>  # Exclude objects with names starting with "TIE2"
+  remove_rownames() |>  # Remove row names from the data
+  column_to_rownames("Object")  # Set "Object" column as row names
+
+# Perform PCA on the filtered data, selecting the elements in 'low.sd.elements.cl_10'
+chad_e_pca <- chad_e1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements that are in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(chad_e_pca)  # Call the function to detect outliers
+outliers  # Output the indices of the outliers
+
+```
+
+```{r}
+
+# PCA with highlighting of the outliers (showing points)
+fviz_pca_ind(chad_e_pca, 
+             label = "none",  # Do not display labels
+             habillage = 1:nrow(chad_e1) %in% outliers,  # Color the points based on whether they are outliers
+             addEllipses = TRUE,  # Add ellipses around the groups
+             palette = c("black", "red"))  # Color the points black for non-outliers and red for outliers
+
+# PCA with highlighting of the outliers (using axes 3 and 4)
+fviz_pca_ind(chad_e_pca, 
+             axes = c(3,4),  # Display the PCA plot using axes 3 and 4
+             label = "none",  # Do not display labels
+             habillage = 1:nrow(chad_e1) %in% outliers,  # Color the points based on whether they are outliers
+             addEllipses = TRUE,  # Add ellipses around the groups
+             palette = c("black", "red"))  # Color the points black for non-outliers and red for outliers
+
+# PCA with highlighting of the outliers (using axes 1 and 2)
+fviz_pca_ind(chad_e_pca, 
+             axes = c(1,2))  # Display the PCA plot using axes 1 and 2
+
+# PCA variable plot with highlighting of the outliers (using axes 1 and 2)
+fviz_pca_var(chad_e_pca, 
+             axes = c(1,2))  # Display the PCA variable plot using axes 1 and 2
+
+# PCA with highlighting of the outliers (using axes 3 and 4)
+fviz_pca_ind(chad_e_pca, 
+             axes = c(3,4))  # Display the PCA plot using axes 3 and 4
+
+# PCA variable plot with highlighting of the outliers (using axes 3 and 4)
+fviz_pca_var(chad_e_pca, 
+             axes = c(3,4))  # Display the PCA variable plot using axes 3 and 4
+
+# Store the outliers for further use
+outliers_chad_e <- outliers  # Save the detected outliers in a new variable
+
+```
+
+
+### Lake Chad South
+
+```{r}
+# Filter and clean the data for the Lake Chad South region and specific objects
+chad_s1 <- RFA.fin |> 
+  filter(Region == "Lake_Chad_South" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Filter for the specific region or objects
+  remove_rownames() |>  # Remove the row names from the data
+  column_to_rownames("Object")  # Set "Object" column as row names
+
+# Perform PCA on the selected elements from the filtered data
+chad_s_pca <- chad_s1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements from 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(chad_s_pca)  # Call the function to detect outliers
+outliers  # Output the indices of the outliers
+
+```
+
+```{r}
+# PCA with highlighting of outliers (black = not outlier, red = outlier)
+fviz_pca_ind(chad_s_pca, 
+             label = "none",  # Do not label the points
+             habillage = 1:nrow(chad_s1) %in% outliers,  # Highlight outliers
+             addEllipses = TRUE,  # Add ellipses for the groups
+             palette = c("black", "red"))  # Color scheme for points (black for normal, red for outliers)
+
+# PCA with highlighting of outliers, using axes 3 and 4
+fviz_pca_ind(chad_s_pca, 
+             axes = c(3,4),  # Use the 3rd and 4th principal components for plotting
+             label = "none",  # Do not label the points
+             habillage = 1:nrow(chad_s1) %in% outliers,  # Highlight outliers
+             addEllipses = TRUE,  # Add ellipses for the groups
+             palette = c("black", "red"))  # Color scheme for points (black for normal, red for outliers)
+
+# PCA with highlighting of outliers, using axes 1 and 2
+fviz_pca_ind(chad_s_pca, 
+             axes = c(1,2))  # Use the 1st and 2nd principal components for plotting
+
+# PCA variable plot with highlighting of outliers, using axes 1 and 2
+fviz_pca_var(chad_s_pca, 
+             axes = c(1,2))  # Use the 1st and 2nd principal components for variable plotting
+
+# PCA with highlighting of outliers, using axes 3 and 4
+fviz_pca_ind(chad_s_pca, 
+             axes = c(3,4))  # Use the 3rd and 4th principal components for plotting
+
+# PCA variable plot with highlighting of outliers, using axes 3 and 4
+fviz_pca_var(chad_s_pca, 
+             axes = c(3,4))  # Use the 3rd and 4th principal components for variable plotting
+
+# Store the detected outliers in a variable for later use
+outliers_chad_s <- outliers  # Store the detected outliers for the Lake Chad South region
+
+
+```
+
+
+
+## Essouk
+```{r}
+Essouk_prov <- read.csv2(here("data/Provenance/Essouk_Nixon.csv"))
+
+Essouk_exot <- Essouk_prov |> 
+  filter(Prov %in% c("Niger_bend")) |> 
+  pull(Object)
+```
+
+
+```{r}
+# Filter and clean the data for the Essouk region, including specific objects
+ess1 <- RFA.fin |> 
+  filter(Region == "Essouk" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Filter for the Essouk region or specific objects
+  remove_rownames() |>  # Remove row names to avoid issues with row-based operations
+  filter(!(Object %in% c("ESS_23","ESS_24","ESS_25","ESS_26","ESS_27","ESS_28","ESS_29"))) |>  # Remove specific unwanted objects
+  column_to_rownames("Object")  # Set the "Object" column as the row names for the data
+
+
+# Perform PCA on the selected elements from the filtered data
+ess_pca <- ess1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements defined in low.sd.elements
+PCA()
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(ess_pca)  # Call the function to detect outliers
+outliers  # Output the indices of the outliers
+```
+
+```{r}
+
+# PCA visualization with highlighting of outliers
+fviz_pca_ind(ess_pca, 
+             label = "none",  # Do not display labels for individual points
+             habillage = 1:nrow(ess1) %in% outliers,  # Highlight outliers in red, others in black
+             addEllipses = TRUE,  # Add confidence ellipses around groups
+             palette = c("black", "red"))  # Color palette (black for normal points, red for outliers)
+
+# PCA visualization on axes 3 and 4 with outlier highlighting
+fviz_pca_ind(ess_pca, 
+             axes = c(3,4),  # Use the 3rd and 4th principal components as the axes
+             label = "none",  # No labels for individual points
+             habillage = 1:nrow(ess1) %in% outliers,  # Highlight outliers
+             addEllipses = TRUE,  # Add ellipses
+             palette = c("black", "red"))  # Color scheme for normal points and outliers
+
+# PCA visualization on the first and second principal components
+fviz_pca_ind(ess_pca, 
+             axes = c(1,2))  # Show the plot using the first and second principal components
+
+# PCA visualization of variable contributions (for first and second components)
+fviz_pca_var(ess_pca, 
+             axes = c(1,2))  # Show variable contributions to the first and second components
+
+# PCA visualization on axes 3 and 4 (again for individual points)
+fviz_pca_ind(ess_pca, 
+             axes = c(3,4))  # Use the third and fourth components
+
+# PCA visualization of variable contributions (on axes 3 and 4)
+fviz_pca_var(ess_pca, 
+             axes = c(3,4))  # Plot variable contributions for axes 3 and 4 of a different PCA (chad_se_pca)
+
+# Save the outliers detected in the PCA
+outliers_ess <- outliers  # Store the detected outliers for the Essouk region
+
+```
+
+## Niger_Niamey
+```{r}
+
+kagn_imp <- c("KAG4a_1","KAG4a_2", "KAG4a_3", "KAG2_5")
+
+# Filter and clean the data for the Karey_Gorou site and specific objects
+nig_nia1 <- RFA.fin |> 
+  filter(Site == "Karey_Gorou" | Site == "Lollo" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Select rows with 'Karey_Gorou' site or specific objects
+  filter(!Object %in% kagn_imp) |> 
+  remove_rownames() |>  # Remove the row names from the data
+  column_to_rownames("Object")  # Set the 'Object' column as the row names
+
+# Perform PCA on the selected elements from the filtered data
+nig_nia_pca <- nig_nia1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements specified in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(nig_nia_pca)  # Call the function to detect outliers
+outliers  # Output the indices of the outliers
+
+```
+
+```{r}
+# PCA with highlighting of outliers
+fviz_pca_ind(nig_nia_pca, 
+             label = "none",  # Remove labels for individual points
+             habillage = 1:nrow(nig_nia1) %in% outliers,  # Highlight outliers in the plot
+             addEllipses = TRUE,  # Add ellipses around clusters
+             palette = c("black", "red"))  # Use black for non-outliers and red for outliers
+
+# PCA with highlighting of outliers, using axes 3 and 4
+fviz_pca_ind(nig_nia_pca, 
+             axes = c(3,4),  # Use the third and fourth principal components
+             label = "none",  # Remove labels for individual points
+             habillage = 1:nrow(nig_nia1) %in% outliers,  # Highlight outliers
+             addEllipses = TRUE,  # Add ellipses around clusters
+             palette = c("black", "red"))  # Use black for non-outliers and red for outliers
+
+# PCA plot showing axes 1 and 2
+fviz_pca_ind(nig_nia_pca, 
+             axes = c(1,2))  # Use the first and second principal components
+
+# PCA plot showing variable contributions on axes 1 and 2
+fviz_pca_var(nig_nia_pca, 
+             axes = c(1,2))  # Show variable contributions on axes 1 and 2
+
+# PCA plot showing axes 3 and 4 for the individual points
+fviz_pca_ind(nig_nia_pca, 
+             axes = c(3,4))  # Use the third and fourth principal components for the individual points
+
+# PCA plot showing variable contributions on axes 3 and 4
+fviz_pca_var(nig_nia_pca, 
+             axes = c(3,4))  # Show variable contributions on axes 3 and 4
+
+# Store the outliers detected in the previous analysis
+outliers_nig_nia <- outliers  # Store the detected outliers for further use
+```
+
+
+## Niger_Sirba
+```{r}
+
+si_imp <- c("Si1_0")
+
+# Filter and clean the data for the Karey_Gorou site and specific objects
+nig_si1 <- RFA.fin |> 
+  filter(Site == "Garbey_Kourou" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Select rows with 'Karey_Gorou' site or specific objects
+  filter(!Object %in% si_imp) |> 
+  remove_rownames() |>  # Remove the row names from the data
+  column_to_rownames("Object")  # Set the 'Object' column as the row names
+
+# Perform PCA on the selected elements from the filtered data
+nig_si_pca <- nig_si1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements specified in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(nig_si_pca, quantile_threshold =0.25 )  # Call the function to detect outliers
+outliers  # Output the indices of the outliers
+
+```
+
+```{r}
+# PCA with highlighting of outliers
+fviz_pca_ind(nig_si_pca, 
+             label = "none",  # Remove labels for individual points
+             habillage = 1:nrow(nig_si1) %in% outliers,  # Highlight outliers in the plot
+             addEllipses = TRUE,  # Add ellipses around clusters
+             palette = c("black", "red"))  # Use black for non-outliers and red for outliers
+
+# PCA with highlighting of outliers, using axes 3 and 4
+fviz_pca_ind(nig_si_pca, 
+             axes = c(3,4),  # Use the third and fourth principal components
+             label = "none",  # Remove labels for individual points
+             habillage = 1:nrow(nig_si1) %in% outliers,  # Highlight outliers
+             addEllipses = TRUE,  # Add ellipses around clusters
+             palette = c("black", "red"))  # Use black for non-outliers and red for outliers
+
+# PCA plot showing axes 1 and 2
+fviz_pca_ind(nig_si_pca, 
+             axes = c(1,2))  # Use the first and second principal components
+
+# PCA plot showing variable contributions on axes 1 and 2
+fviz_pca_var(nig_si_pca, 
+             axes = c(1,2))  # Show variable contributions on axes 1 and 2
+
+# PCA plot showing axes 3 and 4 for the individual points
+fviz_pca_ind(nig_si_pca, 
+             axes = c(3,4))  # Use the third and fourth principal components for the individual points
+
+# PCA plot showing variable contributions on axes 3 and 4
+fviz_pca_var(nig_si_pca, 
+             axes = c(3,4))  # Show variable contributions on axes 3 and 4
+
+# Store the outliers detected in the previous analysis
+outliers_nig_si <- outliers  # Store the detected outliers for further use
+```
+
+## Marandet
+```{r}
+# Define a vector of objects with atypical types to be excluded from the analysis
+untypical_types_mar <- c("MAR1_15", "MAR1_16", "MAR1_26", "MAR1_3", 
+            "MAR1_34", "MAR1_39", "MAR1_42", "MAR1_45", "MAR1_5", "MAR2_1", "MAR2_17", 
+            "MAR2_214", "MAR2_25", "MAR2_36", "MAR2_39", "MAR2_47", "MAR3_10", 
+            "MAR3_100", "MAR3_114", "MAR3_12", "MAR3_201", "MAR3_209", "MAR3_215", 
+            "MAR3_22", "MAR3_28", "MAR1_18", "MAR1_24", "MAR1_4", "MAR1_7", 
+            "MAR2_203", "MAR2_3", "MAR2_52", "MAR3_208", "MAR3_3", "MAR3_34", "MAR_204", "MAR3_84", "MAR2_0", "MAR_1001", "MAR_1002", "MAR_1003")
+
+
+# Filter the data: exclude rows with objects in the 'untypical_types_mar' list 
+# and select data from the "Marandet" region or specific objects
+mar1 <- RFA.fin |> 
+  filter(!(Object %in% c(untypical_types_mar))) |>  # Remove rows with atypical object types
+  filter(Region == "Marandet" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Keep only specified regions or objects
+  column_to_rownames("Object")  # Set "Object" column as row names
+
+# Perform PCA on the filtered data, using only the specified elements
+mar_pca <- mar1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements that are in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(mar_pca)  # Call the function to detect outliers
+
+# Output the indices of the detected outliers
+outliers  # Display the detected outliers
+
+```
+
+```{r}
+# PCA with highlighting of outliers (default axes: PC1 and PC2)
+fviz_pca_ind(mar_pca, 
+             label = "none", 
+             habillage = 1:nrow(mar1) %in% outliers,  # Highlight outliers in the data
+             addEllipses = TRUE,  # Add ellipses for groupings
+             palette = c("black", "red"))  # Red for outliers, black for the rest
+
+# PCA with highlighting of outliers (axes: PC3 and PC4)
+fviz_pca_ind(mar_pca, 
+             axes = c(3,4),  # Use third and fourth principal components
+             label = "none", 
+             habillage = 1:nrow(mar1) %in% outliers,  # Highlight outliers in the data
+             addEllipses = TRUE,  # Add ellipses for groupings
+             palette = c("black", "red"))  # Red for outliers, black for the rest
+
+# PCA with highlighting of outliers (axes: PC1 and PC2)
+fviz_pca_ind(mar_pca, 
+             axes = c(1,2))  # Use first and second principal components
+
+# PCA variable plot (axes: PC1 and PC2)
+fviz_pca_var(mar_pca, 
+             axes = c(1,2))  # Show how the variables contribute to the first two components
+
+# PCA with highlighting of outliers (axes: PC3 and PC4) for individuals
+fviz_pca_ind(mar_pca, 
+             axes = c(3,4))  # Use third and fourth principal components for individuals
+
+# PCA variable plot (axes: PC3 and PC4)
+fviz_pca_var(mar_pca, 
+             axes = c(3,4))  # Show how the variables contribute to the third and fourth components
+
+# Save outliers list for further analysis
+outliers_mar <- outliers  # Save the outliers to a variable for later reference
+
+
+```
+
+
+# Gao
+
+```{r}
+Loc_gao <- read.csv2(here("data/Provenance/Gao.csv"))
+
+gao_exot <- Loc_gao |> 
+  filter(Prov %in% c("Indet", "Comb_black", "Comb_red")) |> 
+  pull(Object)
+```
+
+
+```{r}
+
+
+# Filter the data: exclude rows with objects in the 'untypical_types_mar' list 
+# and select data from the "Marandet" region or specific objects
+gao1 <- RFA.fin |> 
+  filter(Region == "Gao" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Keep only specified regions or objects
+ filter(!Object %in% c(gao_exot)) |> 
+   column_to_rownames("Object")  # Set "Object" column as row names
+
+# Perform PCA on the filtered data, using only the specified elements
+gao_pca <- gao1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements that are in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(gao_pca)  # Call the function to detect outliers
+
+# Output the indices of the detected outliers
+outliers  # Display the detected outliers
+
+```
+
+```{r}
+# PCA with highlighting of outliers using the first two principal components
+fviz_pca_ind(gao_pca, 
+             label = "none",  # Do not display labels on the points
+             habillage = 1:nrow(gao1) %in% outliers,  # Highlight outliers in red
+             addEllipses = TRUE,  # Add ellipses around groups (outliers and others)
+             palette = c("black", "red"))  # Set the color palette to black for regular points and red for outliers
+
+# PCA with highlighting of outliers using the third and fourth principal components
+fviz_pca_ind(gao_pca, 
+             axes = c(3,4),  # Use the 3rd and 4th principal components for visualization
+             label = "none", 
+             habillage = 1:nrow(gao1) %in% outliers,  # Highlight outliers in red
+             addEllipses = TRUE, 
+             palette = c("black", "red"))  # Color palette for points
+
+# PCA with highlighting of outliers using the first two principal components (individual points only)
+fviz_pca_ind(gao_pca, 
+             axes = c(1,2)  # Using the 1st and 2nd principal components
+           )
+
+# PCA with highlighting of outliers, showing the contributions of variables
+fviz_pca_var(gao_pca, 
+             axes = c(1,2)  # Using the 1st and 2nd principal components for variable contributions
+           )
+
+# PCA with highlighting of outliers using the third and fourth principal components (individual points only)
+fviz_pca_ind(gao_pca, 
+             axes = c(3,4)  # Using the 3rd and 4th principal components
+           )
+
+# PCA with highlighting of outliers, showing the contributions of variables for the 3rd and 4th principal components
+fviz_pca_var(gao_pca, 
+             axes = c(3,4)  # Using the 3rd and 4th principal components
+           )
+
+# Store the detected outliers for further analysis
+outliers_gao <- outliers
+
+```
+
+# Birnin_Lafyia
+
+```{r}
+Loc_bla <- read.csv2(here("data/Provenance/Birni_Lafyia_BEN.csv"))
+
+
+lafyia_exot <- Loc_bla |> 
+  filter(Prov != "Lafyia_Exot") |> 
+  pull(Object)
+```
+
+
+```{r}
+
+
+# Filter the data: exclude rows with objects in the 'untypical_types_mar' list 
+# and select data from the "Marandet" region or specific objects
+bla1 <- RFA.fin |> 
+  filter(Region == "Niger_Benin" | Object %in% c("MAR3_54", "ESS_13", "KAG3_5", "TIE_70", "MDA_6")) |>  # Keep only specified regions or objects
+  filter(!Object %in% lafyia_exot) |> 
+  column_to_rownames("Object")  # Set "Object" column as row names
+
+# Perform PCA on the filtered data, using only the specified elements
+bla_pca <- bla1 |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the elements that are in 'low.sd.elements.cl_10'
+  PCA()  # Perform PCA analysis
+
+# Detect Mahalanobis outliers based on the PCA result
+outliers <- detect_mahalanobis_outliers(bla_pca)  # Call the function to detect outliers
+
+# Output the indices of the detected outliers
+outliers  # Display the detected outliers
+
+```
+
+```{r}
+# PCA with highlighting of outliers using the first two principal components
+fviz_pca_ind(bla_pca, 
+             label = "none",  # Do not display labels on the points
+             habillage = 1:nrow(bla1) %in% outliers,  # Highlight outliers in red
+             addEllipses = TRUE,  # Add ellipses around groups (outliers and others)
+             palette = c("black", "red"))  # Set the color palette to black for regular points and red for outliers
+
+# PCA with highlighting of outliers using the third and fourth principal components
+fviz_pca_ind(bla_pca, 
+             axes = c(3,4),  # Use the 3rd and 4th principal components for visualization
+             label = "none", 
+             habillage = 1:nrow(bla1) %in% outliers,  # Highlight outliers in red
+             addEllipses = TRUE, 
+             palette = c("black", "red"))  # Color palette for points
+
+# PCA with highlighting of outliers using the first two principal components (individual points only)
+fviz_pca_ind(bla_pca, 
+             axes = c(1,2)  # Using the 1st and 2nd principal components
+           )
+
+# PCA with highlighting of outliers, showing the contributions of variables
+fviz_pca_var(bla_pca, 
+             axes = c(1,2)  # Using the 1st and 2nd principal components for variable contributions
+           )
+
+# PCA with highlighting of outliers using the third and fourth principal components (individual points only)
+fviz_pca_ind(bla_pca, 
+             axes = c(3,4)  # Using the 3rd and 4th principal components
+           )
+
+# PCA with highlighting of outliers, showing the contributions of variables for the 3rd and 4th principal components
+fviz_pca_var(bla_pca, 
+             axes = c(3,4)  # Using the 3rd and 4th principal components
+           )
+
+# Store the detected outliers for further analysis
+outliers_bla <- outliers
+
+```
+
+
+
+# list of only reference groups
+```{r}
+# Combine all detected outliers from various regions and objects into a single vector
+outliers_all <- c(outliers_mar, 
+                  outliers_chad_nw, 
+                  outliers_chad_e, 
+                 outliers_chad_w,
+                  outliers_chad_s, 
+                 outliers_nig_nia, 
+                 outliers_nig_si, 
+                 outliers_ess, 
+                 outliers_gao,
+                  outliers_bla )
+
+# Add additional outlier objects (untypical types and a specific object "WAL_16") to the outlier list
+outliers_all <- c(names(outliers_all), untypical_types_mar, "WAL_16", Essouk_exot, gao_exot, lafyia_exot, kagn_imp,"BLA_6", "KAM_4")
+
+# Filter the RFA.fin dataset to exclude rows where the 'Object' is in the outliers_all list
+RFA.ref <- RFA.fin |> 
+  filter(Site != "KRK" ) |> 
+    filter(Site != "S21" ) |> 
+  filter(!(Object %in% outliers_all)) # Remove all rows with outliers
+
+```
+
+# discriminatory ref
+
+```{r}
+# Filter the RFA.val dataset based on matching Objects in RFA.ref and exclude a specific site ("Birni_Lafyia")
+RFA4 <- RFA.val |> 
+  filter((Object %in% RFA.ref$Object)) |>  # Keep only the objects present in RFA.ref
+  remove_rownames() |>  # Remove row names (if any) in the dataset
+  column_to_rownames("Object")  # Set "Object" column as row names for the dataset
+
+```
+
+```{r}
+# Create a new dataset 'all_dis' by selecting specific columns from 'RFA.ref'
+all_dis <- RFA.ref |> 
+    column_to_rownames("Object") |>   # Set "Object" column as row names for the dataset
+  dplyr::select(Region, any_of(low.sd.elements.cl_10)) |>  # Select 'Region' column and any elements in 'low.sd.elements.cl_10'
+  rename(Prov = Region)  # Rename the 'Region' column to 'Prov'
+
+```
+
+```{r}
+# Set the random seed for reproducibility
+set.seed(123)
+
+# Create training samples by partitioning 'all_dis$Prov' (the target variable)
+# 80% for training data, remaining 20% for test data
+training.samples <- all_dis$Prov %>%
+  createDataPartition(p = 0.8, list = FALSE)
+
+# Subset the 'all_dis' data to create training and testing datasets
+train.data <- all_dis[training.samples, ]  # 80% of data for training
+test.data <- all_dis[-training.samples, ]  # 20% of data for testing
+
+# Estimate preprocessing parameters for centering and scaling (standardizing the data)
+# Using the training data to estimate the transformation parameters
+preproc.param <- train.data %>% 
+  preProcess(method = c("center", "scale"))  # Center (mean=0) and scale (standard deviation=1)
+
+# Apply the preprocessing parameters to both training and testing datasets
+train.transformed <- preproc.param %>% predict(train.data)  # Apply to training data
+test.transformed <- preproc.param %>% predict(test.data)  # Apply to testing data
+
+```
+
+
+```{r}
+# Load the MASS package for Linear Discriminant Analysis (LDA)
+library(MASS)
+
+# Fit the Linear Discriminant Analysis (LDA) model
+# The target variable is 'Prov', and all other variables are used as predictors
+model <- lda(Prov ~ ., data = train.transformed)
+
+# Make predictions on the test data using the trained model
+predictions <- model %>% predict(test.transformed)
+
+# Calculate and display the model accuracy by comparing predicted classes to the actual values
+accuracy <- mean(predictions$class == test.transformed$Prov)
+print(accuracy)
+
+# Display the model summary
+model
+
+# Optional: Uncomment the next line to plot the model (if needed)
+# plot(model)
+
+# Extract the means of each class (group) for all variables
+means <- model$means
+
+# Calculate the absolute differences between consecutive group means for each variable
+# 'lag()' function shifts the data by one row, and the differences are calculated
+dif <- means %>%
+  as.data.frame() %>%
+  summarise_all(~ sum(abs(. - lag(.)), na.rm = TRUE)) %>%
+  t() %>%
+  as.data.frame() %>%
+  arrange(-V1)  # Sort by the difference in means
+
+# Print the dataframe showing the differences between group means for each variable
+print(dif)
+
+# Check the class type of the 'means' object (should be a matrix or dataframe)
+class(means)
+
+# Create a scatter plot with labels showing the relationship between 'Y' and 'Rb', colored by 'Prov'
+all_dis %>%
+  rownames_to_column("ID") %>%
+  ggplot() +
+  geom_label(aes(x = Y, y = Rb, colour = Prov, label = ID))
+
+# Create a scatter plot with labels showing the relationship between 'Zn' and 'V', colored by 'Prov'
+all_dis %>%
+  rownames_to_column("ID") %>%
+  ggplot() +
+  geom_label(aes(x = Zn, y = V, colour = Prov, label = ID))
+
+# Create a scatter plot with labels showing the relationship between 'Fe2O3' and 'Al2O3', colored by 'Prov'
+all_dis %>%
+  rownames_to_column("ID") %>%
+  ggplot() +
+  geom_label(aes(x = Fe2O3, y = Al2O3, colour = Prov, label = ID))
+
+# Calculate and display the final model accuracy
+accuracy_final <- mean(predictions$class == test.transformed$Prov)
+print(accuracy_final)
+
+```
+
+
+##visualization
+
+```{r}
+# Load necessary libraries for creating the table and scaling colors
+library(gt)
+library(scales)
+
+# Convert the means from the LDA model to a dataframe
+means <- as.data.frame(model$means)
+
+# Get the column names from the means (which represent the elements/variables)
+elements_mean <- colnames(means)
+
+# Create a table using the gt package and apply a color gradient to each column
+means %>%
+  rownames_to_column("Site") %>%  # Add row names as a new column called "Site"
+  gt() %>%  # Create the gt table
+  data_color(  # Apply color gradient to numeric columns
+    columns = elements_mean,  # Apply to all numeric columns
+    colors = scales::col_numeric(  # Use col_numeric to apply a color scale
+      palette = c("red", "yellow", "green"),  # Define the color palette (from red to green)
+      domain = range(as.matrix(means[elements_mean]), na.rm = TRUE)  # Set the range of values across all columns
+    )
+  )
+
+# Save the means dataframe to a CSV file
+write.csv2(means, here("results/mean.csv"))
+
+# Display the means data frame
+as.data.frame(model$means)
+
+```
+
+## reference groups mean & sd
+
+```{r}
+# Create the reference_groups dataset by selecting columns: Region and any low.sd.elements.cl_10 columns
+reference_groups <- RFA4 |> 
+  dplyr::select(Region, any_of(low.sd.elements.cl_10)) |> 
+  rename(Prov = Region)  # Rename "Region" to "Prov"
+
+# Calculate standard deviation (relative to mean) for each element per group (Prov)
+rg_sd <- reference_groups |> 
+  group_by(Prov) |>  # Group by the "Prov" column
+  summarise(across(everything(), ~ (sd(.x, na.rm = TRUE) / mean(.x, na.rm = TRUE)) * 100))  # Relative standard deviation
+
+# Calculate the mean for each element per group (Prov)
+rg_mean <- reference_groups |> 
+  group_by(Prov) |>  # Group by "Prov"
+  summarise(across(everything(), ~ (mean(.x, na.rm = TRUE))))  # Calculate mean for each group
+
+# Use gt() to create a table of means and apply a color gradient for each column
+rg_mean %>%
+  gt() %>%
+  { 
+    tbl <- .  # Store the initial table
+    for (col in elements_mean) {  # Loop through each element in 'elements_mean' to apply color
+      tbl <- tbl %>%
+        data_color(  # Apply the color gradient
+          columns = all_of(col),  # Specify which column to color
+          colors = scales::col_numeric(  # Apply a numeric color scale
+            palette = c("red", "yellow", "green"),  # Color palette from red to green
+            domain = range(rg_mean[[col]], na.rm = TRUE)  # Define the color range from min to max of that column
+          )
+        )
+    }
+    tbl  # Return the table with color applied
+  }
+
+# Create another table for standard deviations (rg_sd) and apply a color gradient
+rg_sd %>%
+  rownames_to_column("Site") |>  # Convert row names to a column named "Site"
+  gt() %>%  # Create a table
+  data_color(  # Apply the color gradient to all columns
+    columns = elements_mean,  # Apply to all columns in 'elements_mean'
+    colors = scales::col_numeric(  # Use a numeric color scale
+      palette = c("green", "yellow", "red"),  # Color palette from green to red
+      domain = range(as.matrix(rg_sd[elements_mean]), na.rm = TRUE)  # Color range for all numeric columns
+    )
+  )
+
+# Save the calculated mean and standard deviation tables to CSV files
+write.csv2(rg_mean, here("results/rg_means.csv"))  # Save means table
+write.csv2(rg_sd, here("results/rg_sd.csv"))  # Save standard deviations table
+```
+
+
+# reference groups pca
+```{r}
+
+# Filter the RFA.ref dataset:
+# Remove rows where the Object column matches any value in outliers_all
+loc <- RFA.ref |> 
+  filter(!(Object %in% outliers_all)) |>  # Remove outliers
+  column_to_rownames("Object")  # Set the "Object" column as row names
+
+# Perform PCA on the filtered dataset "loc"
+# The PCA analysis is based on the selected elements defined in 'low.sd.elements.cl_10'
+pca_loc <- loc |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the specified elements for PCA
+  PCA()  # Perform PCA analysis
+
+
+
+```
+
+```{r}
+# Farbenblind-freundliche "Okabe-Ito"-Palette
+# This defines a color palette for visualizations, designed to be colorblind-friendly
+cb_palette <- cb_palette_14 <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                   "#882255", "#44AA99", "#DDCC77", "#117733")
+
+# Definiere verschiedene Symbole für Gruppen (bis zu 10 Gruppen)
+# This vector defines different shapes for points, up to 10 groups (symbols in ggplot2)
+shape_symbols <- c(1, 17, 18, 15,  3, 7, 10, 13, 8, 11)
+
+# Stelle sicher, dass loc$Region ein Faktor ist
+# Ensures that the "Region" column in the 'loc' dataset is a factor variable (for grouping)
+loc$Region <- as.factor(loc$Region)
+
+# Visualisierung mit fviz_pca_ind
+# This is a PCA plot using the first two principal components
+pca_ref_ind_1_2 <- fviz_pca_ind(pca_loc,
+             geom.ind = "point",        # Only show points (no lines or other markers)
+             col.ind = loc$Region,      # Color points based on the "Region" factor
+             palette = cb_palette,      # Apply the colorblind-friendly palette
+          #   pointshape = unname(symbol_mapping[loc$Region]),  # Uncomment if you want different shapes per group
+          #   addEllipses = TRUE,        # Uncomment to add ellipses around groups
+           #  ellipse.type = "t",        # Uncomment to add t-distribution ellipses
+            # ellipse.level = 0.75,      # Uncomment to set the confidence level of ellipses (default is 0.95)
+             legend.title = "Groups"    # Title for the legend
+)
+
+# Visualisierung mit fviz_pca_ind
+# Another PCA plot, but this time using the first and third principal components
+pca_ref_ind_1_3 <- fviz_pca_ind(pca_loc,
+                          axes = c(1,3),  # Set the axes to the first and third principal components
+             geom.ind = "point",        # Only show points (no lines or other markers)
+             col.ind = loc$Region,      # Color points based on the "Region" factor
+             palette = cb_palette,      # Apply the colorblind-friendly palette
+          #   pointshape = unname(symbol_mapping[loc$Region]),  # Uncomment if you want different shapes per group
+            # addEllipses = TRUE,        # Uncomment to add ellipses around groups
+           #  ellipse.type = "t",        # Uncomment to add t-distribution ellipses
+           #  ellipse.level = 0.75,      # Uncomment to set the confidence level of ellipses (default is 0.95)
+             legend.title = "Groups"    # Title for the legend
+)
+
+# PCA plot for variable contributions (cos2 values), showing the first two principal components
+pca_ref_var_1_2 <- fviz_pca_var(pca_loc, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), # Color gradient for variable cos2 values
+             repel = TRUE # Avoid text overlap for variable labels
+             )
+
+# PCA plot for variable contributions (cos2 values), showing the third and fourth principal components
+pca_ref_var_1_3 <- fviz_pca_var(pca_loc, col.var = "cos2",
+             axes = c(3,4), # Set the axes to the third and fourth principal components
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), # Color gradient for variable cos2 values
+             repel = TRUE # Avoid text overlap for variable labels
+             )
+```
+
+
+```{r}
+# Visualize PCA results for the first and second principal components
+pca_ref_ind_1_2
+
+# Visualize PCA results for the first and third principal components
+pca_ref_ind_1_3
+
+# Save the PCA plot for the first and second principal components to a .jpeg file
+ggsave(here("results/plots/pca_ref_ind_1_2.jpeg"), plot = pca_ref_ind_1_2, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Save the PCA plot for the first and third principal components to a .jpeg file
+ggsave(here("results/plots/pca_ref_ind_1_3.jpeg"), plot = pca_ref_ind_1_3, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Combine the PCA variable contribution plots (first & second, and third & fourth principal components)
+# The plot_grid function arranges the two PCA variable contribution plots in a single row (ncol = 2)
+pca_ref_var <- plot_grid(pca_ref_var_1_2, pca_ref_var_1_3, ncol = 2)
+
+# Display the combined PCA variable contribution plots
+pca_ref_var
+
+# Save the combined PCA variable contribution plots to a .jpeg file
+ggsave(here("results/plots/pca_ref_var.jpeg"), plot = pca_ref_var, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+```
+
+## subset for article
+
+```{r}
+
+# Filter the RFA.ref dataset:
+# Remove rows where the Object column matches any value in outliers_all
+loc <- RFA.ref |> 
+  filter(!(Object %in% outliers_all)) |>  # Remove outliers
+  filter(Region %in% c("Marandet", "Essouk", "Niger_Benin", "Niger_Sirba", "Gao", "Niger_Niamey","Lake_Chad_Northwest", "Lake_Chad_West", "Lake_Chad_East","Lake_Chad_South")) |> 
+  group_by(Region) |> 
+  slice_sample(n = 10) |>  # Wählt zufällig 10 Reihen pro Region aus
+  ungroup() |> 
+  column_to_rownames("Object")  # Set the "Object" column as row names
+
+RFA.ref.s <- RFA.ref |> 
+  filter(!(Object %in% outliers_all)) |>  # Remove outliers
+  group_by(Region) |> 
+  slice_sample(n = 10) |>  # Wählt zufällig 10 Reihen pro Region aus
+  ungroup() 
+
+
+# Perform PCA on the filtered dataset "loc"
+# The PCA analysis is based on the selected elements defined in 'low.sd.elements.cl_10'
+pca_loc <- loc |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the specified elements for PCA
+   #   dplyr::select(-Zn) |>  # Select the columns from 'low.sd.elements.cl_10'
+PCA()  # Perform PCA analysis
+
+pca_loc$var
+
+```
+
+```{r}
+# Farbenblind-freundliche "Okabe-Ito"-Palette
+# This defines a color palette for visualizations, designed to be colorblind-friendly
+cb_palette <- cb_palette_14 <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                   "#882255", "#44AA99", "#DDCC77", "#117733")
+
+# Definiere verschiedene Symbole für Gruppen (bis zu 10 Gruppen)
+# This vector defines different shapes for points, up to 10 groups (symbols in ggplot2)
+shape_symbols <- c(1, 17, 18, 15,  3, 7, 10, 13, 8, 11,2,4,5)
+
+# Stelle sicher, dass loc$Region ein Faktor ist
+# Ensures that the "Region" column in the 'loc' dataset is a factor variable (for grouping)
+loc$Region <- as.factor(loc$Region)
+
+# Visualisierung mit fviz_pca_ind
+# This is a PCA plot using the first two principal components
+pca_ref_ind_1_2 <- fviz_pca(pca_loc,
+               geom.ind = "point",                     # showing points
+    col.ind = loc$Region,             # coloring according to region
+    palette = cb_palette,                  # colorscheme
+    mean.point = FALSE,                    # no meanpoint
+    legend.title = "Groups"
+) +
+  theme(text = element_text(family = "Noto Sans"))  # Change font
+
+# Visualisierung mit fviz_pca_ind
+# Another PCA plot, but this time using the first and third principal components
+pca_ref_ind_1_3 <- fviz_pca(pca_loc,
+                          axes = c(1,3),  # Set the axes to the first and third principal components
+             geom.ind = "point",                     # showing points
+    col.ind = loc$Region,             # coloring according to region
+    palette = cb_palette,                  # colorscheme
+    mean.point = FALSE,                    # no meanpoint
+    legend.title = "Groups"
+) +
+  theme(text = element_text(family = "Noto Sans"))  # Change font
+
+# PCA plot for variable contributions (cos2 values), showing the first two principal components
+pca_ref_var_1_2 <- fviz_pca_var(pca_loc, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), # Color gradient for variable cos2 values
+             repel = TRUE # Avoid text overlap for variable labels
+             )+
+theme_set(
+  theme_minimal(base_family = "Noto Sans") +  # Grunddesign mit Schrift
+    theme(
+      text = element_text(family = "Noto Sans"),        # Gesamter Text
+      title = element_text(family = "Noto Sans"),       # Titel
+      axis.title = element_text(family = "Noto Sans"),  # Achsentitel
+      axis.text = element_text(family = "Noto Sans"),   # Achsenbeschriftungen
+      legend.text = element_text(family = "Noto Sans"), # Legendentext
+      legend.title = element_text(family = "Noto Sans"),
+      strip.text = element_text(family = "Noto Sans")   # Facet-Überschriften
+    )
+)
+# PCA plot for variable contributions (cos2 values), showing the third and fourth principal components
+pca_ref_var_1_3 <- fviz_pca_var(pca_loc, col.var = "cos2",
+             axes = c(1,3), # Set the axes to the third and fourth principal components
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), # Color gradient for variable cos2 values
+             repel = TRUE # Avoid text overlap for variable labels
+             )+
+  theme(text = element_text(family = "Noto Sans"))  # Change font
+```
+
+
+```{r}
+# Visualize PCA results for the first and second principal components
+pca_ref_ind_1_2
+
+# Visualize PCA results for the first and third principal components
+pca_ref_ind_1_3
+
+# Save the PCA plot for the first and second principal components to a .jpeg file
+#ggsave(here("results/plots/pca_ref_ind_1_2.jpeg"), plot = pca_ref_ind_1_2, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Save the PCA plot for the first and third principal components to a .jpeg file
+#ggsave(here("results/plots/pca_ref_ind_1_3.jpeg"), plot = pca_ref_ind_1_3, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Combine the PCA variable contribution plots (first & second, and third & fourth principal components)
+# The plot_grid function arranges the two PCA variable contribution plots in a single row (ncol = 2)
+pca_ref_all <- plot_grid(pca_ref_ind_1_2+ theme(legend.position = "none")
+                         , pca_ref_ind_1_3, ncol = 2, rel_widths = c(2,2,1))
+
+# Display the combined PCA variable contribution plots
+pca_ref_all
+
+# Save the combined PCA variable contribution plots to a .jpeg file
+ggsave(here("results/plots/pca_ref_all.tif"), plot = pca_ref_var, device = "tiff", dpi = 300, width = 8, height = 6)
+
+
+```
+
+```{r}
+library(cowplot)
+
+# 1. Extract the legend from one of the plots (e.g., pca_ref_ind_1_3)
+legend_plot <- get_legend(pca_ref_ind_1_3)
+
+# 2. Remove the legend from both individual plots
+p1_clean <- pca_ref_ind_1_2 + theme(legend.position = "none")
+p2_clean <- pca_ref_ind_1_3 + theme(legend.position = "none")
+
+# 3. Combine the two plots side by side (both without legends)
+combined_plots <- plot_grid(p1_clean, p2_clean,legend_plot, ncol = 3, align = "hv",  rel_widths = c(2,2, 1))
+
+
+combined_plots
+ggsave(here("results/plots/pca_ref_all.tif"), plot = combined_plots, device = "tiff", dpi = 300, width = 8, height = 6)
+
+```
+
+
+```{r}
+# Call the function to plot the 3D PCA with the 'loc' dataset and the PCA results
+plot_3d_pca(loc, pca_loc, shape_by = FALSE, custom_colors =   c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                   "#882255", "#44AA99", "#DDCC77", "#117733"))
+```
+
+
+## refgroups and sgraffito
+```{r}
+
+sgrf_mar <- c("MAR3_208", "MAR2_39", "MAR1_4", "MAR3_209", "MAR3_28")  # Define the list of objects with sgraffito decoration
+
+mar_sgrf <- RFA.fin |> 
+  filter(Object %in% sgrf_mar) |> 
+  mutate(Region = "Marandet_Sgraffito") |> 
+  rbind(RFA.ref) |> 
+  filter(Region %in% c("Lake_Chad_Northwest", "Lake_Chad_West", "Lake_Chad_East","Lake_Chad_South",  "Marandet", "Marandet_Sgraffito")) |> 
+  # Set the "Object" column as row names
+  column_to_rownames("Object")
+
+
+# Perform PCA on the selected data (low.sd.elements.cl_10) from the filtered and transformed dataset
+pca_mar_sgrf <- mar_sgrf |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the columns from 'low.sd.elements.cl_10'
+   PCA()  # Perform Principal Component Analysis
+```
+### Region2
+```{r}
+library(factoextra)
+library(ggplot2)
+
+# Farbenblind-freundliche "Okabe-Ito"-Palette
+# This defines a color palette for visualizations, designed to be colorblind-friendly
+cb_palette <- cb_palette_14 <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                                 "#882255",
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                    "#44AA99", "#DDCC77", "#117733")
+
+# Definiere verschiedene Symbole für Gruppen (bis zu 10 Gruppen)
+# This vector defines different shapes for points, up to 10 groups (symbols in ggplot2)
+shape_symbols <- c(1, 17, 18, 15,  3,2, 7, 10, 13, 8, 11,2,4,5)
+
+
+# Ensure that loc$Region2 is a factor
+mar_sgrf$Region <- as.factor(mar_sgrf$Region)
+
+
+# Visualization with fviz_pca_ind (PCA scatter plot for axes 1 and 2)
+pca_sgrf_ref_ind_1_2_g <- fviz_pca(pca_mar_sgrf,
+             geom.ind = "point",        # Show points only (not "text")
+             col.ind = mar_sgrf$Region,     # Color by Region2
+            palette = cb_palette,                  # colorscheme
+    mean.point = FALSE,                    # no meanpoint
+    legend.title = "Groups"
+) +
+  theme_noto
+
+# Visualization with fviz_pca_ind (PCA scatter plot for axes 1 and 3)
+pca_sgrf_ref_ind_1_3_g <- fviz_pca_ind(pca_mar_sgrf,
+                          axes = c(1,3),
+             geom.ind = "point",        # Show points only
+             col.ind = mar_sgrf$Region,     # Color by Region2
+             palette = cb_palette,      # Colorblind-friendly palette
+             #   pointshape = unname(symbol_mapping[loc$Region2]),  # Use different symbols for each group
+             #   addEllipses = TRUE,        # Add ellipses
+             #   ellipse.type = "t",        # t-distribution for ellipses
+             #   ellipse.level = 0.75,      # Confidence level (0.75 = tighter ellipse)
+             legend.title = "Groups"
+)
+
+# PCA variable contribution plot (axes 1 and 2)
+pca_sgrf_ref_1_2 <- fviz_pca_var(pca_mar_sgrf, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+             )
+
+# PCA variable contribution plot (axes 1 and 3)
+pca_sgrf_ref_1_3 <- fviz_pca_var(pca_mar_sgrf, col.var = "cos2",
+             axes = c(1,3),
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+             )
+
+```
+
+```{r}
+
+pca_sgrf_ref_ind_1_2_g
+
+pca_sgrf_ref_ind_1_3_g
+# Save the PCA scatter plots for axes 1 and 2
+#ggsave(here("results/plots/pca_sgrf_ref_ind_1_2_g.jpeg"), plot = pca_sgrf_ref_ind_1_2_g, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Save the PCA scatter plots for axes 1 and 3
+#ggsave(here("results/plots/pca_sgrf_ref_ind_1_3_g.jpeg"), plot = pca_sgrf_ref_ind_1_3_g, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Load the cowplot package to combine multiple plots
+library(cowplot)
+
+# Combine the PCA variable contribution plots for axes 1 and 2, and axes 1 and 3
+pca_sgrf_ref_var <- plot_grid(pca_sgrf_ref_1_2, pca_sgrf_ref_1_3, ncol = 2)
+
+# Display the combined variable contribution plots
+pca_sgrf_ref_var
+
+# Save the combined PCA variable contribution plot
+ggsave(here("results/plots/pca_sgrf_ref_ind_1_2_g.tif"), plot = pca_sgrf_ref_ind_1_2_g, device = "tiff", dpi = 300, width = 8, height = 6)
+
+```
+
+### plotly
+```{r}
+# Call the function to plot the 3D PCA with the 'loc' dataset and the PCA results
+plot_3d_pca(mar_sgrf, pca_mar_sgrf, shape_by = FALSE, color_by = "Region", custom_colors =   c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                   "#882255", "#44AA99", "#DDCC77", "#117733"))
+```
+
+
+## refgroups and nigerbend imports essouk
+```{r}
+
+essouk_nig <- RFA.fin |> 
+  filter(Object %in% Essouk_exot) |> 
+  mutate(Region = "Essouk_Nigerbend_imp") |> 
+  rbind(RFA.ref) |> 
+  filter(Region %in% c("Essouk", "Niger_Benin", "Gao", "Niger_Niamey","Niger_Sirba",  "Essouk_Nigerbend_imp")) |> 
+  # Set the "Object" column as row names
+  column_to_rownames("Object")
+
+
+# Perform PCA on the selected data (low.sd.elements.cl_10) from the filtered and transformed dataset
+pca_essouk_nig <- essouk_nig |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the columns from 'low.sd.elements.cl_10'
+  PCA()  # Perform Principal Component Analysis
+```
+### Region2
+```{r}
+library(factoextra)
+library(ggplot2)
+
+# Farbenblind-freundliche "Okabe-Ito"-Palette
+# This defines a color palette for visualizations, designed to be colorblind-friendly
+cb_palette <- cb_palette_14 <- c("#E69F00","#DDCC77", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                                 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                    "#44AA99", "#DDCC77", "#117733")
+
+# Definiere verschiedene Symbole für Gruppen (bis zu 10 Gruppen)
+# This vector defines different shapes for points, up to 10 groups (symbols in ggplot2)
+shape_symbols <- c(1,4, 17, 18,5 , 15,  3,2, 7, 10, 13, 8, 11,2,4,5)
+
+# Ensure that loc$Region2 is a factor
+essouk_nig$Region <- as.factor(essouk_nig$Region)
+
+# Create a mapping of Region -> Symbol
+region_levels <- levels(essouk_nig$Region)
+symbol_mapping <- setNames(shape_symbols[seq_along(region_levels)], region_levels)
+
+# Visualization with fviz_pca_ind (PCA scatter plot for axes 1 and 2)
+pca_essouk_nig_1_2_g <- fviz_pca(pca_essouk_nig,
+             geom.ind = "point",        # Show points only (not "text")
+             col.ind = essouk_nig$Region,     # Color by Region2
+            palette = cb_palette,                  # colorscheme
+    mean.point = FALSE,                    # no meanpoint
+    legend.title = "Groups"
+) +
+  theme_noto
+
+
+# Visualization with fviz_pca_ind (PCA scatter plot for axes 1 and 3)
+pca_sgrf_ref_ind_1_3_g <- fviz_pca_ind(pca_essouk_nig,
+                          axes = c(1,3),
+             geom.ind = "point",        # Show points only
+             col.ind = essouk_nig$Region,     # Color by Region2
+              palette = cb_palette,                  # colorscheme
+    mean.point = FALSE,                    # no meanpoint
+    legend.title = "Groups"
+) +
+  theme_noto
+
+
+# PCA variable contribution plot (axes 1 and 2)
+pca_sgrf_ref_1_2 <- fviz_pca_var(pca_essouk_nig, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+             )
+
+# PCA variable contribution plot (axes 1 and 3)
+pca_sgrf_ref_1_3 <- fviz_pca_var(pca_essouk_nig, col.var = "cos2",
+             axes = c(1,3),
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+             )
+
+```
+
+```{r}
+
+pca_sgrf_ref_ind_1_2_g
+
+pca_sgrf_ref_ind_1_3_g
+# Save the PCA scatter plots for axes 1 and 2
+#ggsave(here("results/plots/pca_sgrf_ref_ind_1_2_g.jpeg"), plot = pca_sgrf_ref_ind_1_2_g, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Save the PCA scatter plots for axes 1 and 3
+#ggsave(here("results/plots/pca_sgrf_ref_ind_1_3_g.jpeg"), plot = pca_sgrf_ref_ind_1_3_g, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Load the cowplot package to combine multiple plots
+library(cowplot)
+
+# Combine the PCA variable contribution plots for axes 1 and 2, and axes 1 and 3
+pca_sgrf_ref_var <- plot_grid(pca_sgrf_ref_1_2, pca_sgrf_ref_1_3, ncol = 2)
+
+# Display the combined variable contribution plots
+pca_sgrf_ref_var
+
+pca_essouk_nig_1_2_g
+# Save the combined PCA variable contribution plot
+ggsave(here("results/plots/pca_essouk_nig_1_2_g.tif"), plot = pca_essouk_nig_1_2_g, device = "tiff", dpi = 300, width = 8, height = 6)
+
+```
+
+### plotly
+```{r}
+# Call the function to plot the 3D PCA with the 'loc' dataset and the PCA results
+plot_3d_pca(essouk_nig, pca_essouk_nig, shape_by = FALSE, color_by = "Region", custom_colors =   c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                   "#882255", "#44AA99", "#DDCC77", "#117733"))
+```
+
+
+## mar west and nigerbend
+```{r}
+marw_nig <- RFA.fin |> 
+#  filter(Object %in% Mar_imp_west) |> 
+ filter(Object %in% c("MAR3_84", Essouk_exot)) |> 
+   mutate(Region = ifelse(Region == "Essouk", "Essouk_Nigerbend_imp", "Marandet_Import_West")) |> 
+  rbind(RFA.ref) |> 
+  filter(Region %in% c("Marandet", "Essouk", "Niger_Benin", "Niger_Sirba", "Gao", "Niger_Niamey","Essouk_Nigerbend_imp", "Marandet_Import_West")) |> 
+  # Set the "Object" column as row names
+  column_to_rownames("Object")
+
+
+# Perform PCA on the selected data (low.sd.elements.cl_10) from the filtered and transformed dataset
+pca_marw_nig <- marw_nig |> 
+  dplyr::select(any_of(low.sd.elements.cl_10)) |>  # Select the columns from 'low.sd.elements.cl_10'
+  PCA()  # Perform Principal Component 
+
+```
+### Region2
+```{r}
+library(factoextra)
+library(ggplot2)
+
+# Farbenblind-freundliche "Okabe-Ito"-Palette
+# This defines a color palette for visualizations, designed to be colorblind-friendly
+cb_palette <- cb_palette_14 <- c("#E69F00","#DDCC77", "#56B4E9", "#009E73","#882255", "#F0E442", "#0072B2", 
+                                 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                    "#44AA99", "#DDCC77", "#117733")
+
+# Definiere verschiedene Symbole für Gruppen (bis zu 10 Gruppen)
+# This vector defines different shapes for points, up to 10 groups (symbols in ggplot2)
+shape_symbols <- c(1,4, 17, 18,5 , 15,  3,2, 7, 10, 13, 8, 11,2,4,5)
+
+# Ensure that loc$Region2 is a factor
+marw_nig$Region <- as.factor(marw_nig$Region)
+
+# Create a mapping of Region -> Symbol
+region_levels <- levels(marw_nig$Region)
+symbol_mapping <- setNames(shape_symbols[seq_along(region_levels)], region_levels)
+
+pca_marw_nig_comb_1_2_g <- fviz_pca(pca_marw_nig,
+    axes = c(1, 2),
+    geom.ind = "point",                     # showing points
+    col.ind = marw_nig$Region,             # coloring according to region
+    palette = cb_palette,                  # colorscheme
+    mean.point = FALSE,                    # no meanpoint
+    legend.title = "Groups"
+) +
+  theme_noto
+
+# Visualization with fviz_pca_ind (PCA scatter plot for axes 1 and 3)
+pca_sgrf_ref_ind_1_3_g <- fviz_pca(pca_marw_nig,
+                          axes = c(1,3),
+             geom.ind = "point",        # Show points only
+             col.ind = marw_nig$Region,     # Color by Region2
+             palette = cb_palette,      # Colorblind-friendly palette
+             #   pointshape = unname(symbol_mapping[loc$Region2]),  # Use different symbols for each group
+             #   addEllipses = TRUE,        # Add ellipses
+             #   ellipse.type = "t",        # t-distribution for ellipses
+             #   ellipse.level = 0.75,      # Confidence level (0.75 = tighter ellipse)
+             legend.title = "Groups"
+) +
+theme_noto
+
+# PCA variable contribution plot (axes 1 and 2)
+pca_sgrf_ref_1_2 <- fviz_pca_var(pca_marw_nig, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+             )
+
+# PCA variable contribution plot (axes 1 and 3)
+pca_sgrf_ref_1_3 <- fviz_pca_var(pca_marw_nig, col.var = "cos2",
+             axes = c(1,3),
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+             )
+
+```
+
+```{r}
+
+pca_sgrf_ref_ind_1_2_g
+
+pca_sgrf_ref_ind_1_3_g
+# Save the PCA scatter plots for axes 1 and 2
+#ggsave(here("results/plots/pca_sgrf_ref_ind_1_2_g.jpeg"), plot = pca_sgrf_ref_ind_1_2_g, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Save the PCA scatter plots for axes 1 and 3
+#ggsave(here("results/plots/pca_sgrf_ref_ind_1_3_g.jpeg"), plot = pca_sgrf_ref_ind_1_3_g, device = "jpeg", dpi = 300, width = 8, height = 6)
+
+# Load the cowplot package to combine multiple plots
+library(cowplot)
+
+# Combine the PCA variable contribution plots for axes 1 and 2, and axes 1 and 3
+pca_sgrf_ref_var <- plot_grid(pca_sgrf_ref_1_2, pca_sgrf_ref_1_3, ncol = 2)
+
+# Display the combined variable contribution plots
+pca_sgrf_ref_var
+
+pca_marw_nig_comb_1_2_g
+ggsave(here("results/plots/pca_marw_nig_comb_1_2_g.tif"), plot = pca_marw_nig_comb_1_2_g, device = "tiff", dpi = 300, width = 8, height = 6)
+
+```
+
+### plotly
+```{r}
+# Call the function to plot the 3D PCA with the 'loc' dataset and the PCA results
+plot_3d_pca(marw_nig, pca_marw_nig, shape_by = FALSE, color_by = "Region", custom_colors =   c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                   "#D55E00", "#CC79A7", "#999999", "#660066", "#FFB6C1",
+                   "#882255", "#44AA99", "#DDCC77", "#117733"))
+```
+
+
+## sherds measured and sherds in reference groups
+```{r}
+# Group data from the 'RFA.fin' dataset by 'Site' and 'Region' 
+# and count the number of distinct 'Object' entries in each group
+RFA.fin |> 
+  group_by(Site, Region) |> 
+  summarise(n = n_distinct(Object)) 
+
+# Group data from the 'RFA.ref' dataset by 'Site' and 'Region' 
+# and count the number of distinct 'Object' entries in each group
+RFA.ref |> 
+  group_by(Site, Region) |> 
+  summarise(n = n_distinct(Object))
+
+RFA.fin |> 
+  group_by(Region) |> 
+  summarize() |> 
+  nrow()
+
+RFA.fin |> 
+  group_by(Site) |> 
+  summarize() |> 
+  nrow()
+```
